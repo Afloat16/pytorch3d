@@ -43,13 +43,13 @@ def se3_exp_map(log_transform: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     se3_log_map(se3_exponential_map(log_transform)) == log_transform
     ```
 
-    The conversion has a singularity around `||log(transform)|| = 0`
-    which is handled by clamping controlled with the `eps` argument.
+    Near zero rotation the translation coefficients are evaluated with their
+    analytic Taylor limits to keep values and gradients accurate.
 
     Args:
         log_transform: Batch of vectors of shape `(minibatch, 6)`.
-        eps: A threshold for clipping the squared norm of the rotation logarithm
-            to avoid unstable gradients in the singular case.
+        eps: Retained for compatibility with the SO(3) exponential-map helper.
+            Translation uses analytic small-angle limits instead of clamping.
 
     Returns:
         Batch of transformation matrices of shape `(minibatch, 4, 4)`.
@@ -139,8 +139,8 @@ def se3_log_map(
 
     Args:
         transform: batch of SE(3) matrices of shape `(minibatch, 4, 4)`.
-        eps: A threshold for clipping the squared norm of the rotation logarithm
-            to avoid division by zero in the singular case.
+        eps: Retained for compatibility with the SE(3) helper interface.
+            Translation uses analytic small-angle limits instead of clamping.
         cos_bound: Clamps the cosine of the rotation angle to
             [-1 + cos_bound, 3 - cos_bound] to avoid non-finite outputs.
             The non-finite outputs can be caused by passing small rotation angles
@@ -192,19 +192,26 @@ def _se3_V_matrix(
     [1] https://jinyongjeong.github.io/Download/SE3/jlblanco2010geometry3d_techrep.pdf
     """
 
+    squared_angles = torch.square(log_rotation).sum(-1)
+    near_zero = squared_angles < 1e-2
+    # Use a harmless denominator for the Taylor branch. The clamped angles
+    # supplied by the SO(3) helper do not describe the actual input rotation.
+    angles = torch.sqrt(torch.where(near_zero, 1.0, squared_angles))
+    alpha = 0.5 * torch.sinc(angles * 0.5 / torch.pi).square()
+    beta = (1.0 - torch.sinc(angles / torch.pi)) / angles.square()
+    # Analytic coefficients of integral_0^1 exp(t * hat(omega)) dt.
+    alpha_series = 0.5 + squared_angles * (
+        -1.0 / 24.0 + squared_angles * (1.0 / 720.0 - squared_angles / 40320.0)
+    )
+    beta_series = 1.0 / 6.0 + squared_angles * (
+        -1.0 / 120.0 + squared_angles * (1.0 / 5040.0 - squared_angles / 362880.0)
+    )
+    alpha = torch.where(near_zero, alpha_series, alpha)
+    beta = torch.where(near_zero, beta_series, beta)
     V = (
         torch.eye(3, dtype=log_rotation.dtype, device=log_rotation.device)[None]
-        + log_rotation_hat
-        * ((1 - torch.cos(rotation_angles)) / torch.square(rotation_angles))[
-            :, None, None
-        ]
-        + (
-            log_rotation_hat_square
-            * (
-                (rotation_angles - torch.sin(rotation_angles))
-                / torch.pow(rotation_angles, 3)
-            )[:, None, None]
-        )
+        + log_rotation_hat * alpha[:, None, None]
+        + log_rotation_hat_square * beta[:, None, None]
     )
 
     return V

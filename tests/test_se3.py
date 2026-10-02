@@ -241,6 +241,39 @@ class TestSE3(TestCaseMixin, unittest.TestCase):
             transform[:, 3, :3], torch.zeros_like(transform[:, :3, 3]), atol=1e-4
         )
 
+    def test_se3_exp_small_rotations_matrix_exp(self):
+        for angle in (0.0, 1e-8, 1e-5, 1e-3, 0.09, 0.11):
+            tangent = torch.tensor(
+                [[2.0, -1.0, 3.0, angle, -0.3 * angle, 0.2 * angle]],
+                dtype=torch.float64,
+            )
+            omega = tangent[:, 3:]
+            x, y, z = omega.unbind(-1)
+            zero = torch.zeros_like(x)
+            skew = torch.stack((zero, -z, y, z, zero, -x, -y, x, zero), -1).reshape(
+                -1, 3, 3
+            )
+            algebra = torch.zeros(1, 4, 4, dtype=torch.float64)
+            algebra[:, :3, :3] = skew
+            algebra[:, :3, 3] = tangent[:, :3]
+            expected = torch.matrix_exp(algebra).transpose(-1, -2)
+            torch.testing.assert_close(
+                se3_exp_map(tangent), expected, atol=2e-14, rtol=2e-14
+            )
+
+    def test_se3_exp_translation_derivative_at_identity(self):
+        tangent = torch.tensor(
+            [[2.0, -1.0, 3.0, 0.0, 0.0, 0.0]], dtype=torch.float64, requires_grad=True
+        )
+        jacobian = torch.autograd.functional.jacobian(
+            lambda x: se3_exp_map(x)[0, 3, :3], tangent
+        )
+        # d(V(omega) v)/domega at zero is -hat(v)/2.
+        expected = torch.tensor(
+            [[0.0, 1.5, 0.5], [-1.5, 0.0, 1.0], [-0.5, -1.0, 0.0]], dtype=torch.float64
+        )
+        torch.testing.assert_close(jacobian[:, 0, 3:], expected, atol=1e-14, rtol=1e-14)
+
     def test_se3_log_zero_translation(self, batch_size: int = 100):
         """
         Check that `se3_log_map` with zero translation gives
